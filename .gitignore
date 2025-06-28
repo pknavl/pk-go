@@ -1,0 +1,54 @@
+# Node
+node_modules/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build output
+/dist/
+/build/
+/.next/
+/.turbo/
+/.cache/
+/.output/
+
+# Serverless
+/.serverless/
+/.webpack/
+
+# VSCode
+.vscode/
+
+# Local env
+.env
+.env.*
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+.terraform.lock.hcl
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage/
+
+# Misc
+*.swp
+*.swo
+.idea/
+
+# S3 deployment artifacts
+frontend/dist/
+
+# Ignore compiled TypeScript
+*.tsbuildinfo
+
+# Ignore Jest/Vitest cache
+jest-cache/
+vitest-cache/
