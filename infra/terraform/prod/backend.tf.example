@@ -1,0 +1,9 @@
+terraform {
+  backend "s3" {
+    bucket         = "serverless-app-template-prod-tf-state"
+    key            = "terraform/prod.tfstate"
+    region         = "us-east-2"
+    encrypt        = true
+    dynamodb_table = "serverless-app-template-prod-tf-locks"
+  }
+}

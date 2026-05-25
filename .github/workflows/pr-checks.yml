@@ -1,0 +1,184 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main, live]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  quality:
+    name: Lint, Typecheck, Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm run test
+
+  terraform-plan-org:
+    name: Terraform Plan (org)
+    runs-on: ubuntu-latest
+    environment: org
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-2' }}
+      PROJECT_SLUG: ${{ vars.PROJECT_SLUG != '' && vars.PROJECT_SLUG || secrets.PROJECT_SLUG != '' && secrets.PROJECT_SLUG || '' }}
+      DOMAIN: ${{ vars.DOMAIN != '' && vars.DOMAIN || secrets.DOMAIN != '' && secrets.DOMAIN || '' }}
+      ZONE_ID: ${{ vars.ROUTE53_ZONE_ID != '' && vars.ROUTE53_ZONE_ID || secrets.ROUTE53_ZONE_ID != '' && secrets.ROUTE53_ZONE_ID || '' }}
+      AWS_SIGNIN_START_URL: ${{ vars.AWS_SIGNIN_START_URL != '' && vars.AWS_SIGNIN_START_URL || secrets.AWS_SIGNIN_START_URL != '' && secrets.AWS_SIGNIN_START_URL || '' }}
+      ORG_DEPLOY_ROLE_ARN: ${{ vars.ORG_DEPLOY_ROLE_ARN != '' && vars.ORG_DEPLOY_ROLE_ARN || secrets.ORG_DEPLOY_ROLE_ARN != '' && secrets.ORG_DEPLOY_ROLE_ARN || '' }}
+      DEV_DEPLOY_ROLE_ARN: ${{ vars.DEV_DEPLOY_ROLE_ARN != '' && vars.DEV_DEPLOY_ROLE_ARN || secrets.DEV_DEPLOY_ROLE_ARN != '' && secrets.DEV_DEPLOY_ROLE_ARN || '' }}
+      PROD_DEPLOY_ROLE_ARN: ${{ vars.PROD_DEPLOY_ROLE_ARN != '' && vars.PROD_DEPLOY_ROLE_ARN || secrets.PROD_DEPLOY_ROLE_ARN != '' && secrets.PROD_DEPLOY_ROLE_ARN || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.ORG_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=infra/terraform/org init \
+            -backend-config="bucket=${PROJECT_SLUG}-org-tf-state" \
+            -backend-config="key=terraform/org.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${PROJECT_SLUG}-org-tf-locks" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/terraform/org validate
+
+      - name: Terraform plan
+        run: |
+          TF_ARGS=(
+            -var "project_name=${PROJECT_SLUG}"
+            -var "region=${AWS_REGION}"
+            -var "domain=${DOMAIN}"
+            -var "zone_id=${ZONE_ID}"
+            -var "trusted_role_arns=[\"${DEV_DEPLOY_ROLE_ARN}\",\"${PROD_DEPLOY_ROLE_ARN}\"]"
+            -var "aws_signin_redirect_enabled=$([[ -n \"${AWS_SIGNIN_START_URL}\" ]] && echo true || echo false)"
+            -var "aws_signin_start_url=${AWS_SIGNIN_START_URL}"
+            -var "aws_signin_redirect_subdomain=aws.${DOMAIN}"
+          )
+
+          terraform -chdir=infra/terraform/org plan "${TF_ARGS[@]}"
+
+  terraform-plan-dev:
+    name: Terraform Plan (dev)
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-2' }}
+      PROJECT_SLUG: ${{ vars.PROJECT_SLUG != '' && vars.PROJECT_SLUG || secrets.PROJECT_SLUG != '' && secrets.PROJECT_SLUG || '' }}
+      DOMAIN: ${{ vars.DOMAIN != '' && vars.DOMAIN || secrets.DOMAIN != '' && secrets.DOMAIN || '' }}
+      ZONE_ID: ${{ vars.ROUTE53_ZONE_ID != '' && vars.ROUTE53_ZONE_ID || secrets.ROUTE53_ZONE_ID != '' && secrets.ROUTE53_ZONE_ID || '' }}
+      ORG_ROUTE53_ROLE_ARN: ${{ vars.ORG_ROUTE53_ROLE_ARN != '' && vars.ORG_ROUTE53_ROLE_ARN || secrets.ORG_ROUTE53_ROLE_ARN != '' && secrets.ORG_ROUTE53_ROLE_ARN || '' }}
+      DEV_DEPLOY_ROLE_ARN: ${{ vars.DEV_DEPLOY_ROLE_ARN != '' && vars.DEV_DEPLOY_ROLE_ARN || secrets.DEV_DEPLOY_ROLE_ARN != '' && secrets.DEV_DEPLOY_ROLE_ARN || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.DEV_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=infra/terraform/dev init \
+            -backend-config="bucket=${PROJECT_SLUG}-dev-tf-state" \
+            -backend-config="key=terraform/dev.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${PROJECT_SLUG}-dev-tf-locks" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/terraform/dev validate
+
+      - name: Terraform plan
+        run: |
+          terraform -chdir=infra/terraform/dev plan \
+            -var "project_name=${PROJECT_SLUG}" \
+            -var "region=${AWS_REGION}" \
+            -var "domain=${DOMAIN}" \
+            -var "zone_id=${ZONE_ID}" \
+            -var "org_route53_role_arn=${ORG_ROUTE53_ROLE_ARN}"
+
+  terraform-plan-prod:
+    name: Terraform Plan (prod)
+    runs-on: ubuntu-latest
+    environment: prod
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-2' }}
+      PROJECT_SLUG: ${{ vars.PROJECT_SLUG != '' && vars.PROJECT_SLUG || secrets.PROJECT_SLUG != '' && secrets.PROJECT_SLUG || '' }}
+      DOMAIN: ${{ vars.DOMAIN != '' && vars.DOMAIN || secrets.DOMAIN != '' && secrets.DOMAIN || '' }}
+      ZONE_ID: ${{ vars.ROUTE53_ZONE_ID != '' && vars.ROUTE53_ZONE_ID || secrets.ROUTE53_ZONE_ID != '' && secrets.ROUTE53_ZONE_ID || '' }}
+      ORG_ROUTE53_ROLE_ARN: ${{ vars.ORG_ROUTE53_ROLE_ARN != '' && vars.ORG_ROUTE53_ROLE_ARN || secrets.ORG_ROUTE53_ROLE_ARN != '' && secrets.ORG_ROUTE53_ROLE_ARN || '' }}
+      PROD_DEPLOY_ROLE_ARN: ${{ vars.PROD_DEPLOY_ROLE_ARN != '' && vars.PROD_DEPLOY_ROLE_ARN || secrets.PROD_DEPLOY_ROLE_ARN != '' && secrets.PROD_DEPLOY_ROLE_ARN || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.PROD_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=infra/terraform/prod init \
+            -backend-config="bucket=${PROJECT_SLUG}-prod-tf-state" \
+            -backend-config="key=terraform/prod.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${PROJECT_SLUG}-prod-tf-locks" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/terraform/prod validate
+
+      - name: Terraform plan
+        run: |
+          terraform -chdir=infra/terraform/prod plan \
+            -var "project_name=${PROJECT_SLUG}" \
+            -var "region=${AWS_REGION}" \
+            -var "domain=${DOMAIN}" \
+            -var "zone_id=${ZONE_ID}" \
+            -var "org_route53_role_arn=${ORG_ROUTE53_ROLE_ARN}"

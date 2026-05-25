@@ -1,0 +1,116 @@
+service: app
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${env:AWS_REGION, 'us-east-2'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    APP_TABLE_NAME: ${cf:${self:custom.infraServiceName}-${self:provider.stage}.AppDataTableName}
+    WS_CONNECTIONS_TABLE_NAME: ${cf:${self:custom.infraServiceName}-${self:provider.stage}.WsConnectionsTableName, ''}
+    COGNITO_USER_POOL_ID: ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/cognito/user-pool-id}
+    COGNITO_APP_CLIENT_ID: ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/cognito/app-client-id}
+    WS_MANAGEMENT_ENDPOINT: ${cf:ws-${self:provider.stage}.AppWsManagementEndpoint, ''}
+    APIGW_CERTIFICATE_ARN: ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/acm/apigw-certificate-arn}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:DeleteItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:${aws:accountId}:table/${cf:${self:custom.infraServiceName}-${self:provider.stage}.AppDataTableName}
+            - arn:aws:dynamodb:${self:provider.region}:${aws:accountId}:table/${cf:${self:custom.infraServiceName}-${self:provider.stage}.WsConnectionsTableName, ''}
+        - Effect: Allow
+          Action:
+            - execute-api:ManageConnections
+          Resource: "*"
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:${aws:accountId}:parameter/${env:PROJECT_SLUG}/*
+
+  httpApi:
+    cors: true
+    disableDefaultEndpoint: true
+    authorizers:
+      cognitoAuth:
+        identitySource: "$request.header.Authorization"
+        issuerUrl: https://cognito-idp.${self:provider.region}.amazonaws.com/${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/cognito/user-pool-id}
+        audience:
+          - ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/cognito/app-client-id}
+
+plugins:
+  - serverless-esbuild
+
+custom:
+  infraServiceName: ${env:PROJECT_SLUG}-infra
+  appApiSubdomain:
+    dev: app-api-dev
+    prod: app-api
+
+package:
+  individually: true
+
+functions:
+  postHello:
+    handler: handlers/index.postHelloHandler
+    events:
+      - httpApi:
+          path: /hello
+          method: post
+          authorizer: cognitoAuth
+
+  getLatest:
+    handler: handlers/index.getLatestHandler
+    events:
+      - httpApi:
+          path: /hello/latest
+          method: get
+          authorizer: cognitoAuth
+
+  getMe:
+    handler: handlers/index.getMeHandler
+    events:
+      - httpApi:
+          path: /me
+          method: get
+          authorizer: cognitoAuth
+
+  getAdmin:
+    handler: handlers/index.getAdminHandler
+    events:
+      - httpApi:
+          path: /admin
+          method: get
+          authorizer: cognitoAuth
+
+resources:
+  Resources:
+    AppApiDomain:
+      Type: AWS::ApiGatewayV2::DomainName
+      Properties:
+        DomainName: ${self:custom.appApiSubdomain.${self:provider.stage}}.${env:DOMAIN}
+        DomainNameConfigurations:
+          - CertificateArn: ${self:provider.environment.APIGW_CERTIFICATE_ARN}
+            EndpointType: REGIONAL
+
+    AppApiMapping:
+      Type: AWS::ApiGatewayV2::ApiMapping
+      Properties:
+        DomainName: !Ref AppApiDomain
+        ApiId: !Ref HttpApi
+        Stage: "$default"
+
+  Outputs:
+    AppApiDomainTargetName:
+      Value: !GetAtt AppApiDomain.RegionalDomainName
+
+    AppApiDomainTargetZoneId:
+      Value: !GetAtt AppApiDomain.RegionalHostedZoneId

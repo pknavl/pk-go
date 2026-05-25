@@ -1,0 +1,15 @@
+services:
+  infra:
+    path: infra
+  app:
+    path: app
+    dependsOn:
+      - infra
+  ws:
+    path: ws
+    dependsOn:
+      - infra
+  api:
+    path: api
+    dependsOn:
+      - infra

@@ -1,0 +1,85 @@
+service: ws
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${env:AWS_REGION, 'us-east-2'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    WS_CONNECTIONS_TABLE_NAME: ${cf:${self:custom.infraServiceName}-${self:provider.stage}.WsConnectionsTableName}
+    COGNITO_USER_POOL_ID: ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/cognito/user-pool-id}
+    COGNITO_APP_CLIENT_ID: ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/cognito/app-client-id}
+    APIGW_CERTIFICATE_ARN: ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/acm/apigw-certificate-arn}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:DeleteItem
+          Resource:
+            - arn:aws:dynamodb:${self:provider.region}:${aws:accountId}:table/${cf:${self:custom.infraServiceName}-${self:provider.stage}.WsConnectionsTableName}
+        - Effect: Allow
+          Action:
+            - ssm:GetParameter
+          Resource:
+            - arn:aws:ssm:${self:provider.region}:${aws:accountId}:parameter/${env:PROJECT_SLUG}/*
+
+plugins:
+  - serverless-esbuild
+
+custom:
+  infraServiceName: ${env:PROJECT_SLUG}-infra
+  appWsSubdomain:
+    dev: app-ws-dev
+    prod: app-ws
+
+package:
+  individually: true
+
+functions:
+  connect:
+    handler: handlers/index.connectHandler
+    events:
+      - websocket:
+          route: $connect
+
+  disconnect:
+    handler: handlers/index.disconnectHandler
+    events:
+      - websocket:
+          route: $disconnect
+
+  default:
+    handler: handlers/index.defaultHandler
+    events:
+      - websocket:
+          route: $default
+
+resources:
+  Resources:
+    AppWsDomain:
+      Type: AWS::ApiGatewayV2::DomainName
+      Properties:
+        DomainName: ${self:custom.appWsSubdomain.${self:provider.stage}}.${env:DOMAIN}
+        DomainNameConfigurations:
+          - CertificateArn: ${self:provider.environment.APIGW_CERTIFICATE_ARN}
+            EndpointType: REGIONAL
+
+    AppWsMapping:
+      Type: AWS::ApiGatewayV2::ApiMapping
+      Properties:
+        DomainName: !Ref AppWsDomain
+        ApiId: !Ref WebsocketsApi
+        Stage: !Ref WebsocketsDeploymentStage
+
+  Outputs:
+    AppWsDomainTargetName:
+      Value: !GetAtt AppWsDomain.RegionalDomainName
+
+    AppWsDomainTargetZoneId:
+      Value: !GetAtt AppWsDomain.RegionalHostedZoneId
+
+    AppWsManagementEndpoint:
+      Value: !Sub "https://${WebsocketsApi}.execute-api.${AWS::Region}.amazonaws.com/${self:provider.stage}"

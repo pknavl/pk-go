@@ -1,0 +1,240 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to deploy to dev
+        required: true
+        default: main
+        type: string
+      org:
+        description: Run org Terraform apply
+        required: true
+        type: boolean
+        default: false
+      backend:
+        description: Deploy backend
+        required: true
+        type: boolean
+        default: true
+      frontend:
+        description: Deploy frontend
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: manual-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  org:
+    name: Terraform Org
+    if: inputs.org
+    uses: ./.github/workflows/terraform-org.yml
+    with:
+      action: apply
+      aws_region: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || 'us-east-2' }}
+      project_slug: ${{ vars.PROJECT_SLUG != '' && vars.PROJECT_SLUG || '' }}
+      domain: ${{ vars.DOMAIN }}
+      zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+      org_deploy_role_arn: ${{ vars.ORG_DEPLOY_ROLE_ARN }}
+      dev_deploy_role_arn: ${{ vars.DEV_DEPLOY_ROLE_ARN }}
+      prod_deploy_role_arn: ${{ vars.PROD_DEPLOY_ROLE_ARN }}
+      aws_signin_start_url: ${{ vars.AWS_SIGNIN_START_URL != '' && vars.AWS_SIGNIN_START_URL || '' }}
+    secrets: inherit
+
+  terraform-env:
+    name: Terraform Env
+    if: always() && (!inputs.org || needs.org.result == 'success')
+    needs: [org]
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      STAGE: dev
+      DEPLOY_ROLE_ARN: ${{ vars.DEV_DEPLOY_ROLE_ARN != '' && vars.DEV_DEPLOY_ROLE_ARN || secrets.DEV_DEPLOY_ROLE_ARN != '' && secrets.DEV_DEPLOY_ROLE_ARN || '' }}
+      AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-2' }}
+      PROJECT_SLUG: ${{ vars.PROJECT_SLUG != '' && vars.PROJECT_SLUG || secrets.PROJECT_SLUG != '' && secrets.PROJECT_SLUG || '' }}
+      DOMAIN: ${{ vars.DOMAIN != '' && vars.DOMAIN || secrets.DOMAIN != '' && secrets.DOMAIN || '' }}
+      ZONE_ID: ${{ vars.ROUTE53_ZONE_ID != '' && vars.ROUTE53_ZONE_ID || secrets.ROUTE53_ZONE_ID != '' && secrets.ROUTE53_ZONE_ID || '' }}
+      ORG_ROUTE53_ROLE_ARN: ${{ vars.ORG_ROUTE53_ROLE_ARN != '' && vars.ORG_ROUTE53_ROLE_ARN || secrets.ORG_ROUTE53_ROLE_ARN != '' && secrets.ORG_ROUTE53_ROLE_ARN || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        run: |
+          terraform -chdir="infra/terraform/${STAGE}" init \
+            -backend-config="bucket=${PROJECT_SLUG}-${STAGE}-tf-state" \
+            -backend-config="key=terraform/${STAGE}.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${PROJECT_SLUG}-${STAGE}-tf-locks" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform apply
+        run: |
+          terraform -chdir="infra/terraform/${STAGE}" apply -auto-approve \
+            -var "project_name=${PROJECT_SLUG}" \
+            -var "region=${AWS_REGION}" \
+            -var "domain=${DOMAIN}" \
+            -var "zone_id=${ZONE_ID}" \
+            -var "org_route53_role_arn=${ORG_ROUTE53_ROLE_ARN}"
+
+  deploy-backend:
+    name: Deploy Backend
+    if: inputs.backend && needs.terraform-env.result == 'success'
+    needs: [terraform-env]
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      STAGE: dev
+      DEPLOY_ROLE_ARN: ${{ vars.DEV_DEPLOY_ROLE_ARN != '' && vars.DEV_DEPLOY_ROLE_ARN || secrets.DEV_DEPLOY_ROLE_ARN != '' && secrets.DEV_DEPLOY_ROLE_ARN || '' }}
+      AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-2' }}
+      PROJECT_SLUG: ${{ vars.PROJECT_SLUG != '' && vars.PROJECT_SLUG || secrets.PROJECT_SLUG != '' && secrets.PROJECT_SLUG || '' }}
+      DOMAIN: ${{ vars.DOMAIN != '' && vars.DOMAIN || secrets.DOMAIN != '' && secrets.DOMAIN || '' }}
+      ORG_ROUTE53_ROLE_ARN: ${{ vars.ORG_ROUTE53_ROLE_ARN != '' && vars.ORG_ROUTE53_ROLE_ARN || secrets.ORG_ROUTE53_ROLE_ARN != '' && secrets.ORG_ROUTE53_ROLE_ARN || '' }}
+      ROUTE53_ZONE_ID: ${{ vars.ROUTE53_ZONE_ID != '' && vars.ROUTE53_ZONE_ID || secrets.ROUTE53_ZONE_ID != '' && secrets.ROUTE53_ZONE_ID || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy backend with serverless compose
+        run: |
+          cd serverless
+          npx serverless deploy --stage "$STAGE"
+
+      - name: Sync API DNS in org account
+        run: |
+          scripts/sync-api-dns.sh \
+            --stage "$STAGE" \
+            --project "$PROJECT_SLUG" \
+            --domain "$DOMAIN" \
+            --zone-id "$ROUTE53_ZONE_ID" \
+            --org-role-arn "$ORG_ROUTE53_ROLE_ARN" \
+            --region "$AWS_REGION"
+
+  deploy-frontend:
+    name: Deploy Frontend
+    if: inputs.frontend && needs.terraform-env.result == 'success'
+    needs: [terraform-env]
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      STAGE: dev
+      DEPLOY_ROLE_ARN: ${{ vars.DEV_DEPLOY_ROLE_ARN != '' && vars.DEV_DEPLOY_ROLE_ARN || secrets.DEV_DEPLOY_ROLE_ARN != '' && secrets.DEV_DEPLOY_ROLE_ARN || '' }}
+      AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-2' }}
+      PROJECT_SLUG: ${{ vars.PROJECT_SLUG != '' && vars.PROJECT_SLUG || secrets.PROJECT_SLUG != '' && secrets.PROJECT_SLUG || '' }}
+      DOMAIN: ${{ vars.DOMAIN != '' && vars.DOMAIN || secrets.DOMAIN != '' && secrets.DOMAIN || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve frontend SSM values
+        run: |
+          APP_BUCKET="$(aws ssm get-parameter --name "/${PROJECT_SLUG}/${STAGE}/frontend/app-bucket" --region "$AWS_REGION" --query 'Parameter.Value' --output text)"
+          APP_DIST_ID="$(aws ssm get-parameter --name "/${PROJECT_SLUG}/${STAGE}/frontend/app-distribution-id" --region "$AWS_REGION" --query 'Parameter.Value' --output text)"
+          APEX_BUCKET=""
+          APEX_DIST_ID=""
+
+          if [[ "$STAGE" == "prod" ]]; then
+            APEX_BUCKET="$(aws ssm get-parameter --name "/${PROJECT_SLUG}/${STAGE}/frontend/apex-bucket" --region "$AWS_REGION" --query 'Parameter.Value' --output text)"
+            APEX_DIST_ID="$(aws ssm get-parameter --name "/${PROJECT_SLUG}/${STAGE}/frontend/apex-distribution-id" --region "$AWS_REGION" --query 'Parameter.Value' --output text)"
+          fi
+
+          USER_POOL_ID="$(aws ssm get-parameter --name "/${PROJECT_SLUG}/${STAGE}/cognito/user-pool-id" --region "$AWS_REGION" --query 'Parameter.Value' --output text)"
+          APP_CLIENT_ID="$(aws ssm get-parameter --name "/${PROJECT_SLUG}/${STAGE}/cognito/app-client-id" --region "$AWS_REGION" --query 'Parameter.Value' --output text)"
+
+          if [[ "$STAGE" == "prod" ]]; then
+            echo "VITE_APP_API_URL=https://app-api.${DOMAIN}" >> "$GITHUB_ENV"
+          else
+            echo "VITE_APP_API_URL=https://app-api-dev.${DOMAIN}" >> "$GITHUB_ENV"
+          fi
+
+          if [[ "$STAGE" == "prod" ]]; then
+            echo "VITE_APP_WS_URL=wss://app-ws.${DOMAIN}" >> "$GITHUB_ENV"
+          else
+            echo "VITE_APP_WS_URL=wss://app-ws-dev.${DOMAIN}" >> "$GITHUB_ENV"
+          fi
+
+          echo "VITE_COGNITO_USER_POOL_ID=${USER_POOL_ID}" >> "$GITHUB_ENV"
+          echo "VITE_COGNITO_APP_CLIENT_ID=${APP_CLIENT_ID}" >> "$GITHUB_ENV"
+          echo "VITE_AWS_REGION=${AWS_REGION}" >> "$GITHUB_ENV"
+          echo "APP_BUCKET=${APP_BUCKET}" >> "$GITHUB_ENV"
+          echo "APP_DIST_ID=${APP_DIST_ID}" >> "$GITHUB_ENV"
+          echo "APEX_BUCKET=${APEX_BUCKET}" >> "$GITHUB_ENV"
+          echo "APEX_DIST_ID=${APEX_DIST_ID}" >> "$GITHUB_ENV"
+
+      - name: Build frontend
+        run: |
+          VITE_APP_API_URL="$VITE_APP_API_URL" \
+          VITE_APP_WS_URL="$VITE_APP_WS_URL" \
+          VITE_COGNITO_USER_POOL_ID="$VITE_COGNITO_USER_POOL_ID" \
+          VITE_COGNITO_APP_CLIENT_ID="$VITE_COGNITO_APP_CLIENT_ID" \
+          VITE_AWS_REGION="$VITE_AWS_REGION" \
+          npm run build --workspace @serverless-app-template/frontend
+
+      - name: Deploy app frontend bucket
+        run: aws s3 sync frontend/dist "s3://${APP_BUCKET}" --delete
+
+      - name: Deploy apex marketing placeholder
+        if: env.STAGE == 'prod'
+        run: aws s3 sync website "s3://${APEX_BUCKET}" --delete
+
+      - name: Invalidate app CloudFront cache
+        run: aws cloudfront create-invalidation --distribution-id "$APP_DIST_ID" --paths "/*"
+
+      - name: Invalidate apex CloudFront cache
+        if: env.STAGE == 'prod'
+        run: aws cloudfront create-invalidation --distribution-id "$APEX_DIST_ID" --paths "/*"

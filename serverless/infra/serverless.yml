@@ -1,0 +1,58 @@
+service: ${env:PROJECT_SLUG}-infra
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  region: ${env:AWS_REGION, 'us-east-2'}
+  stage: ${opt:stage, 'dev'}
+
+custom:
+  tableName: ${env:PROJECT_SLUG}-${self:provider.stage}
+  wsConnectionTableName: ${env:PROJECT_SLUG}-ws-connections-${self:provider.stage}
+
+resources:
+  Resources:
+    AppDataTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.tableName}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    WsConnectionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.wsConnectionTableName}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: connectionId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: connectionId
+            KeyType: HASH
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+  Outputs:
+    AppDataTableName:
+      Value: ${self:custom.tableName}
+      Export:
+        Name: ${self:service}-${self:provider.stage}-AppDataTableName
+
+    WsConnectionsTableName:
+      Value: ${self:custom.wsConnectionTableName}
+      Export:
+        Name: ${self:service}-${self:provider.stage}-WsConnectionsTableName

@@ -1,0 +1,72 @@
+service: api
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ${env:AWS_REGION, 'us-east-2'}
+  stage: ${opt:stage, 'dev'}
+  environment:
+    APIGW_CERTIFICATE_ARN: ${ssm:/${env:PROJECT_SLUG}/${self:provider.stage}/acm/apigw-certificate-arn}
+
+  apiGateway:
+    disableDefaultEndpoint: true
+    apiKeys:
+      - testing:
+          - ${env:PROJECT_SLUG}-${self:provider.stage}-testing-api-key
+    usagePlan:
+      - testing:
+          quota:
+            limit: 1000
+            period: MONTH
+          throttle:
+            burstLimit: 10
+            rateLimit: 5
+
+plugins:
+  - serverless-esbuild
+
+custom:
+  apiSubdomain:
+    dev: api-dev
+    prod: api
+
+package:
+  individually: true
+
+functions:
+  health:
+    handler: handlers/index.healthHandler
+    events:
+      - http:
+          path: health
+          method: get
+          private: true
+
+resources:
+  Resources:
+    ApiDomain:
+      Type: AWS::ApiGateway::DomainName
+      Properties:
+        DomainName: ${self:custom.apiSubdomain.${self:provider.stage}}.${env:DOMAIN}
+        RegionalCertificateArn: ${self:provider.environment.APIGW_CERTIFICATE_ARN}
+        EndpointConfiguration:
+          Types:
+            - REGIONAL
+
+    ApiBasePathMapping:
+      Type: AWS::ApiGateway::BasePathMapping
+      DependsOn:
+        - ApiGatewayDeployment${sls:instanceId}
+      Properties:
+        DomainName: !Ref ApiDomain
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        Stage: ${self:provider.stage}
+
+  Outputs:
+    ApiDomainTargetName:
+      Value: !GetAtt ApiDomain.RegionalDomainName
+
+    ApiDomainTargetZoneId:
+      Value: !GetAtt ApiDomain.RegionalHostedZoneId

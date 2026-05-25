@@ -1,0 +1,38 @@
+{
+  "name": "serverless-app-template",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "shared",
+    "serverless/infra",
+    "serverless/app",
+    
+    "serverless/ws",
+    
+    "serverless/api",
+    
+    "frontend"
+  ],
+  "scripts": {
+    "bootstrap:account": "bash scripts/bootstrap-account.sh",
+    "sync:api-dns": "bash scripts/sync-api-dns.sh",
+    "create:cognito-demo-users": "bash scripts/create-cognito-users.sh",
+    "compose:deploy:dev": "cd serverless && npx serverless deploy --stage dev",
+    "compose:deploy:prod": "cd serverless && npx serverless deploy --stage prod",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "check": "npm run lint && npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "@typescript-eslint/eslint-plugin": "^8.26.1",
+    "@typescript-eslint/parser": "^8.26.1",
+    "eslint": "^8.57.1",
+    "prettier": "^3.5.3",
+    "serverless": "^3.40.0",
+    "serverless-esbuild": "^1.55.1",
+    "typescript": "^5.8.2",
+    "vitest": "^3.1.1"
+  }
+}

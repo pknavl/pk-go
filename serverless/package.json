@@ -1,0 +1,13 @@
+{
+  "name": "@serverless-app-template/serverless-root",
+  "version": "0.1.0",
+  "private": true,
+  "devDependencies": {
+    "@serverless/compose": "^1.3.0",
+    "serverless": "^3.40.0"
+  },
+  "scripts": {
+    "deploy:dev": "serverless deploy --stage dev",
+    "deploy:prod": "serverless deploy --stage prod"
+  }
+}
